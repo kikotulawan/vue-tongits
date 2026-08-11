@@ -138,10 +138,6 @@
 						>
 					</span>
 				</label>
-				<div class="random-note"
-					>🎲 First player is randomized every
-					game.</div
-				>
 				<button
 					v-if="setupPlayers === 1"
 					class="action-btn blue-btn start-button"
@@ -149,6 +145,46 @@
 					@click="startGame">
 					START GAME
 				</button>
+			</div>
+		</div>
+
+		<!-- DISCARD HISTORY MODAL -->
+		<div
+			v-if="showDiscardModal"
+			class="modal-backdrop"
+			@click.self="showDiscardModal = false">
+			<div class="rules-panel">
+				<button
+					class="modal-close"
+					@click="showDiscardModal = false"
+					>×</button
+				>
+				<div class="modal-kicker">HISTORY</div>
+				<h2>Discarded Cards</h2>
+				<div class="discard-history-grid">
+					<div
+						v-if="!discardPile.length"
+						class="empty-msg">
+						No cards discarded yet.
+					</div>
+					<div
+						v-for="(card, idx) in discardPile"
+						:key="'dh-' + idx"
+						class="game-card discard-history-card"
+						:class="[cardColor(card)]">
+						<span class="card-corner top">
+							<b>{{ card.rank }}</b>
+							<i>{{ card.suit }}</i>
+						</span>
+						<span class="card-suit-large">{{
+							card.suit
+						}}</span>
+						<span class="card-corner bottom">
+							<b>{{ card.rank }}</b>
+							<i>{{ card.suit }}</i>
+						</span>
+					</div>
+				</div>
 			</div>
 		</div>
 
@@ -243,6 +279,17 @@
 				</button>
 
 				<div class="hud-right">
+					<button
+						class="green-circle-btn"
+						@click="showDiscardModal = true"
+						aria-label="View Discards">
+						<span
+							class="menu-icon"
+							style="font-size: 20px"
+							>👁️</span
+						>
+					</button>
+
 					<button
 						class="green-circle-btn"
 						@click="showRules = true"
@@ -683,6 +730,7 @@
 	const message = ref("");
 	const messageType = ref("info");
 	const showRules = ref(false);
+	const showDiscardModal = ref(false);
 	const winner = ref(null);
 	const winReason = ref("");
 	const animationType = ref("");
@@ -1020,6 +1068,7 @@
 		animationType.value = "";
 		specialEffect.value = "";
 		recentlyDrawnCardIds.value = [];
+		showDiscardModal.value = false;
 	}
 
 	function initializePlayers() {
@@ -2160,7 +2209,7 @@
 	}
 
 	/* =========================
-	   MODALS (SETUP & RULES & GAME OVER)
+	   MODALS (SETUP & RULES & GAME OVER & DISCARD HISTORY)
 	========================= */
 	.setup-screen,
 	.modal-backdrop {
@@ -2187,7 +2236,6 @@
 		position: relative;
 		display: flex;
 		flex-direction: column;
-		gap: 16px;
 		overflow: hidden;
 	}
 
@@ -2257,9 +2305,9 @@
 
 	.player-options {
 		display: grid;
-		grid-template-columns: repeat(3, 1fr);
+		grid-template-columns: repeat(2, 1fr);
 		gap: 10px;
-		margin-bottom: 15px;
+		margin: 15px 0px;
 	}
 	.player-option {
 		background: #11346e;
@@ -2290,13 +2338,6 @@
 		margin-bottom: 15px;
 		font-size: 14px;
 	}
-	.random-note {
-		text-align: center;
-		font-size: 11px;
-		color: #aaa;
-		margin-bottom: 20px;
-	}
-
 	.scoreboard {
 		margin: 15px 0;
 		background: rgba(0, 0, 0, 0.3);
@@ -2335,6 +2376,43 @@
 	}
 	.mini-card.red {
 		color: #d52b2b;
+	}
+
+	/* DISCARD HISTORY */
+	.discard-history-grid {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px;
+		justify-content: center;
+		overflow-y: auto;
+		max-height: 40vh;
+		padding: 10px;
+		background: rgba(0, 0, 0, 0.2);
+		border-radius: 8px;
+	}
+
+	.discard-history-card {
+		position: relative;
+		width: 45px;
+		height: 64px;
+		border-radius: 4px;
+		box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
+	}
+
+	.discard-history-card .card-suit-large {
+		font-size: 20px;
+	}
+
+	.discard-history-card .card-corner b {
+		font-size: 10px;
+	}
+
+	.empty-msg {
+		color: rgba(255, 255, 255, 0.6);
+		padding: 20px;
+		font-size: 14px;
+		width: 100%;
+		text-align: center;
 	}
 
 	/* =========================
