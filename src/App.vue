@@ -355,11 +355,7 @@
 									class="pile-card game-card discard-card"
 									:class="[cardColor(topDiscard)]"
 									:disabled="!canDrawDiscard"
-									@click="
-										onlineMode
-											? onlineDrawDiscard()
-											: drawFromDiscard()
-									">
+									@click="drawFromDiscard()">
 									<span class="card-corner top">
 										<b>{{ topDiscard.rank }}</b>
 										<i>{{ topDiscard.suit }}</i>
@@ -473,14 +469,6 @@
 					</button>
 
 					<button
-						v-if="turnPhase === 'discard'"
-						class="action-btn blue-btn"
-						:disabled="!canSortHand"
-						@click="sortCurrentHand">
-						SORT
-					</button>
-
-					<button
 						class="action-btn blue-btn"
 						:disabled="
 							selectedCards.length !== 1 ||
@@ -496,12 +484,9 @@
 
 					<button
 						v-if="canUndoDiscardTake"
+						type="button"
 						class="action-btn red-btn"
-						@click="
-							onlineMode
-								? socket.emit('game:undo-discard')
-								: undoDiscardTake()
-						">
+						@click="undoDiscardTake">
 						UNDO
 					</button>
 				</div>
@@ -509,12 +494,12 @@
 				<!-- BOTTOM PLAYER AREA -->
 				<section
 					class="player-bottom-area"
-					v-if="myPlayer && !myPlayer.isBot">
+					v-if="currentPlayer && !currentPlayer.isBot">
 					<div class="player-profile-dock">
 						<div class="profile-avatar">👤</div>
 						<div class="profile-info-box">
 							<div class="profile-name">{{
-								myPlayer.name
+								currentPlayer.name
 							}}</div>
 							<div class="profile-chips">11.3T 💰</div>
 						</div>
@@ -560,7 +545,7 @@
 						<div class="hand-points-badge">
 							<span>POINT</span>
 							<strong>{{
-								handValue(myPlayer.hand)
+								handValue(currentPlayer.hand)
 							}}</strong>
 						</div>
 					</div>
@@ -704,6 +689,7 @@
 	const specialEffect = ref("");
 	const recentlyDrawnCardIds = ref([]);
 	const lastTakenDiscardId = ref(null);
+	const lastTakenDiscardPlayerId = ref(null);
 	let messageTimer = null;
 	let effectTimer = null;
 
@@ -726,16 +712,48 @@
 	);
 
 	const canUndoDiscardTake = computed(() => {
-		return (
-			gameState.value === "playing" &&
-			turnPhase.value === "discard" &&
-			!!currentPlayer.value &&
-			!currentPlayer.value.isBot &&
-			lastTakenDiscardId.value !== null &&
-			currentPlayer.value.hand.some(
-				(card) =>
-					card.id === lastTakenDiscardId.value,
-			)
+		if (gameState.value !== "playing") {
+			return false;
+		}
+
+		if (turnPhase.value !== "discard") {
+			return false;
+		}
+
+		if (lastTakenDiscardId.value === null) {
+			return false;
+		}
+
+		const player = onlineMode.value
+			? myPlayer.value
+			: currentPlayer.value;
+
+		if (!player) {
+			return false;
+		}
+
+		if (player.isBot) {
+			return false;
+		}
+
+		if (onlineMode.value) {
+			if (!isMyTurn.value) {
+				return false;
+			}
+
+			if (
+				lastTakenDiscardPlayerId.value !== null &&
+				lastTakenDiscardPlayerId.value !== player.id
+			) {
+				return false;
+			}
+		}
+
+		return player.hand.some(
+			(card) =>
+				card &&
+				String(card.id) ===
+					String(lastTakenDiscardId.value),
 		);
 	});
 
@@ -771,17 +789,15 @@
 	};
 
 	const sortedCurrentHand = computed(() => {
-		const player = onlineMode.value
-			? myPlayer.value
-			: currentPlayer.value;
+		const player = handOwner.value;
 
-		if (!player) {
+		if (!player || !Array.isArray(player.hand)) {
 			return [];
 		}
 
-		return [...player.hand].sort(
-			cardSortComparator,
-		);
+		return [...player.hand]
+			.filter(Boolean)
+			.sort(cardSortComparator);
 	});
 
 	const isMyTurn = computed(() => {
@@ -790,29 +806,9 @@
 		}
 
 		return (
-			!!myPlayer.value &&
-			!!onlineState.value &&
-			onlineState.value.currentPlayerId ===
-				myPlayer.value.id
+			currentPlayer.value?.id === myPlayerId.value
 		);
 	});
-
-	const canSortHand = computed(() => {
-		return (
-			gameState.value === "playing" &&
-			!!currentPlayer.value &&
-			!currentPlayer.value.isBot &&
-			currentPlayer.value.hand.length > 0
-		);
-	});
-
-	function sortCurrentHand() {
-		if (!canSortHand.value || !currentPlayer.value)
-			return;
-		currentPlayer.value.hand.sort(
-			cardSortComparator,
-		);
-	}
 
 	const canDrawDeck = computed(() => {
 		return (
@@ -844,19 +840,21 @@
 	});
 
 	const canUseDiscardCard = (card) => {
+		const player = handOwner.value;
 		if (
 			!card ||
-			!currentPlayer.value ||
-			currentPlayer.value.isBot
+			!player ||
+			player.isBot ||
+			(onlineMode.value && !isMyTurn.value)
 		)
 			return false;
 		if (
-			currentPlayer.value.melds.some((meld) =>
+			player.melds.some((meld) =>
 				canAddCardToMeld(card, meld),
 			)
 		)
 			return true;
-		const hand = currentPlayer.value.hand;
+		const hand = player.hand;
 		for (let i = 0; i < hand.length; i++) {
 			for (let j = i + 1; j < hand.length; j++) {
 				if (isValidMeld([card, hand[i], hand[j]]))
@@ -901,112 +899,47 @@
 	|--------------------------------------------------------------------------
 	*/
 
-	function createOnlineRoom() {
-		if (!playerName.value) {
-			showMessage(
-				"Player name is required.",
-				"warning",
-			);
-
-			return;
-		}
-
-		if (!isOnline.value) {
-			showMessage(
-				"You must be online for 2-player mode.",
-				"warning",
-			);
-
-			return;
-		}
-
-		onlineMode.value = true;
-
-		socket.emit("room:create", {
-			playerName: playerName.value,
-		});
-	}
-
 	function startGame() {
-		if (!playerName.value) {
+		if (!playerName.value.trim()) {
 			showMessage(
 				"Player name is required.",
 				"warning",
 			);
-
 			return;
 		}
 
-		/*
-    |--------------------------------------------------------------------------
-    | 2 PLAYER = ONLINE ONLY
-    |--------------------------------------------------------------------------
-    */
-
+		// Two-player mode always uses the Socket.IO room.
 		if (setupPlayers.value === 2) {
-			if (!isOnline.value) {
-				showMessage(
-					"2-player mode requires an online connection.",
-					"warning",
-				);
-
-				return;
-			}
-
 			createOnlineRoom();
-
 			return;
 		}
 
-		/*
-    |--------------------------------------------------------------------------
-    | 1 PLAYER = LOCAL
-    |--------------------------------------------------------------------------
-    */
-
+		// One-player mode is completely local.
 		onlineMode.value = false;
 
 		initializePlayers();
-
-		/*
-    |--------------------------------------------------------------------------
-    | Use player's entered name
-    |--------------------------------------------------------------------------
-    */
-
-		players.value[0].name = playerName.value;
+		players.value[0].name = playerName.value.trim();
 
 		createAndShuffleDeck();
 
-		/*
-    |--------------------------------------------------------------------------
-    | RANDOMIZE STARTER BEFORE DEALING
-    |--------------------------------------------------------------------------
-    */
-
+		// Randomize the starter before dealing.
 		const randomStarter = Math.floor(
 			Math.random() * players.value.length,
 		);
 
 		currentPlayerIndex.value = randomStarter;
-
 		dealCards();
 
 		gameState.value = "playing";
-
 		turnPhase.value = "discard";
-
 		roundNumber.value = 1;
-
 		selectedCards.value = [];
-
 		winner.value = null;
-
 		winReason.value = "";
-
 		animationType.value = "";
-
 		recentlyDrawnCardIds.value = [];
+		lastTakenDiscardId.value = null;
+		lastTakenDiscardPlayerId.value = null;
 
 		showMessage(
 			`🎲 ${currentPlayer.value.name} starts and must discard first.`,
@@ -1017,15 +950,65 @@
 			`🎲 ${currentPlayer.value.name}`,
 		);
 
-		if (!onlineMode.value) {
-			nextTick(() => {
-				processBotTurn();
-			});
+		nextTick(() => {
+			processBotTurn();
+		});
+	}
+
+	/*
+	|--------------------------------------------------------------------------
+	| ONLINE ROOM CREATION
+	|--------------------------------------------------------------------------
+	| This must be top-level in <script setup> because the template
+	| calls createOnlineRoom directly.
+	*/
+	function createOnlineRoom() {
+		if (!playerName.value.trim()) {
+			showMessage(
+				"Player name is required.",
+				"warning",
+			);
+			return;
 		}
+
+		if (!isOnline.value || !socket.connected) {
+			showMessage(
+				"Connecting to the game server. Please try again.",
+				"warning",
+			);
+			connectSocket();
+			return;
+		}
+
+		onlineMode.value = true;
+		gameState.value = "setup";
+		players.value = [];
+		roomCode.value = "";
+		myPlayerId.value = null;
+		selectedCards.value = [];
+		selectedMeldTarget.value = null;
+		lastTakenDiscardId.value = null;
+		lastTakenDiscardPlayerId.value = null;
+
+		console.log("[Tongits] Creating room", {
+			playerName: playerName.value.trim(),
+			socketId: socket.id,
+		});
+
+		socket.emit("room:create", {
+			playerName: playerName.value.trim(),
+		});
 	}
 
 	function newGame() {
 		gameState.value = "setup";
+		onlineMode.value = false;
+		onlineState.value = null;
+		roomCode.value = "";
+		joinRoomCode.value = "";
+		myPlayerId.value = null;
+		lastTakenDiscardId.value = null;
+		lastTakenDiscardPlayerId.value = null;
 		players.value = [];
 		deck.value = [];
 		discardPile.value = [];
@@ -1054,7 +1037,7 @@
 			if (botEnabled.value) {
 				result.push({
 					id: 2,
-					name: "MikeStorm",
+					name: "Scarlett O.",
 					hand: [],
 					melds: [],
 					isBot: true,
@@ -1070,17 +1053,22 @@
 			players.value[currentPlayerIndex.value] ||
 			null,
 	);
-	const myPlayer = computed(() => {
-		if (!onlineMode.value) {
-			return currentPlayer.value;
-		}
 
+	const myPlayer = computed(() => {
+		if (!onlineMode.value)
+			return currentPlayer.value;
 		return (
 			players.value.find(
 				(player) => player.id === myPlayerId.value,
 			) || null
 		);
 	});
+
+	const handOwner = computed(() =>
+		onlineMode.value
+			? myPlayer.value
+			: currentPlayer.value,
+	);
 
 	/*
 	|--------------------------------------------------------------------------
@@ -1208,12 +1196,14 @@
 			playerName: playerName.value,
 		});
 	}
-
 	socket.on(
 		"room:created",
 		({ roomCode: code, playerId }) => {
+			onlineMode.value = true;
 			roomCode.value = code;
-			myPlayerId.value = Number(playerId);
+			myPlayerId.value = playerId;
+			gameState.value = "setup";
+
 			showMessage(
 				`Room ${code} created. Waiting for another player...`,
 				"success",
@@ -1224,15 +1214,15 @@
 	socket.on(
 		"room:joined",
 		({ roomCode: code, playerId }) => {
+			onlineMode.value = true;
 			roomCode.value = code;
-			myPlayerId.value = Number(playerId);
-			showMessage(`Joined room ${code}.`, "success");
+			myPlayerId.value = playerId;
+			gameState.value = "setup";
 		},
 	);
 
 	socket.on("game:state", (state) => {
 		if (!onlineMode.value || !state) return;
-
 		onlineState.value = state;
 		players.value = Array.isArray(state.players)
 			? state.players.map((player) => ({
@@ -1250,7 +1240,6 @@
 						: 0,
 				}))
 			: [];
-
 		discardPile.value = Array.isArray(
 			state.discardPile,
 		)
@@ -1264,15 +1253,17 @@
 		turnPhase.value = state.turnPhase || "draw";
 		winner.value = state.winner || null;
 		winReason.value = state.winReason || "";
+		lastTakenDiscardId.value =
+			state.lastTakenDiscardId ?? null;
 
+		lastTakenDiscardPlayerId.value =
+			state.lastTakenDiscardPlayerId ?? null;
 		gameState.value =
 			state.status === "finished"
 				? "finished"
 				: state.status === "playing"
 					? "playing"
 					: "setup";
-
-		// The backend intentionally sends only the deck count.
 		deck.value = Array.from(
 			{
 				length: Math.max(
@@ -1282,25 +1273,13 @@
 			},
 			(_, index) => ({ id: `server-card-${index}` }),
 		);
-
 		selectedCards.value = [];
 		selectedMeldTarget.value = null;
 	});
-
 	socket.on(
 		"game:message",
 		({ text, type = "info" }) => {
 			showMessage(text, type);
-		},
-	);
-
-	socket.on(
-		"game:error",
-		({ message: errorMessage }) => {
-			showMessage(
-				errorMessage || "Game action failed.",
-				"warning",
-			);
 		},
 	);
 
@@ -1338,6 +1317,10 @@
 
 	function drawFromDiscard() {
 		if (!canDrawDiscard.value) return;
+		if (onlineMode.value) {
+			onlineDrawDiscard();
+			return;
+		}
 		const card = discardPile.value.pop();
 		if (!card) return;
 		currentPlayer.value.hand.push(card);
@@ -1353,34 +1336,69 @@
 	}
 
 	function undoDiscardTake() {
-		if (!canUndoDiscardTake.value) return;
-		const cardIndex =
-			currentPlayer.value.hand.findIndex(
-				(card) =>
-					card.id === lastTakenDiscardId.value,
-			);
-		if (cardIndex === -1) {
-			lastTakenDiscardId.value = null;
+		if (!canUndoDiscardTake.value) {
 			return;
 		}
-		const [card] = currentPlayer.value.hand.splice(
-			cardIndex,
-			1,
+
+		if (onlineMode.value) {
+			socket.emit("game:undo-discard");
+			return;
+		}
+
+		const player = currentPlayer.value;
+
+		if (!player) {
+			return;
+		}
+
+		const cardIndex = player.hand.findIndex(
+			(card) =>
+				card &&
+				String(card.id) ===
+					String(lastTakenDiscardId.value),
 		);
+
+		if (cardIndex === -1) {
+			showMessage(
+				"The taken discarded card could not be found.",
+				"warning",
+			);
+			return;
+		}
+
+		const [card] = player.hand.splice(cardIndex, 1);
+
+		if (!card) {
+			return;
+		}
+
 		discardPile.value.push(card);
+
 		lastTakenDiscardId.value = null;
+		lastTakenDiscardPlayerId.value = null;
+
 		selectedCards.value = [];
 		recentlyDrawnCardIds.value = [];
+
 		turnPhase.value = "draw";
+
 		animationType.value = "undo";
+
+		showMessage(
+			"The taken discarded card was returned.",
+			"success",
+		);
+
 		clearAnimationLater();
 	}
 
 	function toggleCardSelection(card) {
+		const player = handOwner.value;
 		if (
 			turnPhase.value !== "discard" ||
-			!currentPlayer.value ||
-			currentPlayer.value.isBot
+			!player ||
+			player.isBot ||
+			(onlineMode.value && !isMyTurn.value)
 		)
 			return;
 		const index = selectedCards.value.indexOf(
@@ -1400,8 +1418,8 @@
 	}
 
 	function getSelectedCardObjects() {
-		if (!currentPlayer.value) return [];
-		return currentPlayer.value.hand.filter((card) =>
+		if (!handOwner.value) return [];
+		return handOwner.value.hand.filter((card) =>
 			selectedCards.value.includes(card.id),
 		);
 	}
@@ -1514,6 +1532,7 @@
 			)
 		) {
 			lastTakenDiscardId.value = null;
+			lastTakenDiscardPlayerId.value = null;
 		}
 		removeCardsFromHand(cards);
 		currentPlayer.value.melds.push(cards);
@@ -1531,6 +1550,7 @@
 			card.id === lastTakenDiscardId.value
 		) {
 			lastTakenDiscardId.value = null;
+			lastTakenDiscardPlayerId.value = null;
 		}
 		const player = players.value.find(
 			(player) =>
@@ -1585,33 +1605,71 @@
 		return false;
 	}
 	function onlineDrawDiscard() {
-		if (!onlineMode.value || !isMyTurn.value)
+		if (
+			!onlineMode.value ||
+			!isMyTurn.value ||
+			turnPhase.value !== "draw"
+		) {
 			return;
+		}
+
+		if (!topDiscard.value) {
+			showMessage(
+				"There is no discarded card to take.",
+				"warning",
+			);
+			return;
+		}
+
+		if (!canUseDiscardCard(topDiscard.value)) {
+			showMessage(
+				"You can only take the discard if you can use it in a meld.",
+				"warning",
+			);
+			return;
+		}
+
 		socket.emit("game:draw-discard");
 	}
 
 	function onlineMeld() {
-		if (!onlineMode.value || !isMyTurn.value)
-			return;
-
-		if (canCreateMeld.value) {
-			socket.emit("game:create-meld", {
-				cardIds: [...selectedCards.value],
-			});
+		if (
+			!onlineMode.value ||
+			!isMyTurn.value ||
+			turnPhase.value !== "discard"
+		) {
 			return;
 		}
 
-		if (
-			canAddToMeld.value &&
-			selectedMeldTarget.value
-		) {
+		if (canCreateMeld.value) {
+			const cardIds = [...selectedCards.value];
+
+			socket.emit("game:create-meld", {
+				cardIds,
+			});
+
+			return;
+		}
+
+		if (canAddToMeld.value) {
+			const card = getSelectedCardObjects()[0];
+
+			if (!card || !selectedMeldTarget.value) return;
+
 			socket.emit("game:add-to-meld", {
-				cardId: selectedCards.value[0],
+				cardId: card.id,
 				targetPlayerId:
 					selectedMeldTarget.value.playerId,
 				meldIndex: selectedMeldTarget.value.meldIndex,
 			});
+
+			return;
 		}
+
+		showMessage(
+			"Select a valid meld or a card that can be added to a meld.",
+			"warning",
+		);
 	}
 
 	function onlineDrawDeck() {
@@ -1625,15 +1683,24 @@
 	function onlineDiscard() {
 		if (
 			!onlineMode.value ||
+			!isMyTurn.value ||
 			selectedCards.value.length !== 1
 		) {
 			return;
 		}
+		if (lastTakenDiscardId.value !== null) {
+			showMessage(
+				"You must meld the taken discard or press UNDO first.",
+				"warning",
+			);
+			return;
+		}
 
 		const cardId = selectedCards.value[0];
-		if (cardId == null) return;
 
-		socket.emit("game:discard", { cardId });
+		socket.emit("game:discard", {
+			cardId,
+		});
 	}
 
 	function discardSelected() {
@@ -1657,6 +1724,7 @@
 		discardPile.value.push(card);
 		selectedCards.value = [];
 		lastTakenDiscardId.value = null;
+		lastTakenDiscardPlayerId.value = null;
 		animationType.value = "discard";
 		if (checkTongits()) return;
 		clearAnimationLater();
@@ -1678,6 +1746,7 @@
 		selectedCards.value = [];
 		recentlyDrawnCardIds.value = [];
 		lastTakenDiscardId.value = null;
+		lastTakenDiscardPlayerId.value = null;
 		currentPlayerIndex.value =
 			(currentPlayerIndex.value + 1) %
 			players.value.length;
@@ -1709,13 +1778,21 @@
 
 	function cardValue(card) {
 		if (!card) return 0;
+
 		const rankValue = Number(card.rankValue);
-		if (!Number.isFinite(rankValue)) return 0;
-		return rankValue >= 10 ? 10 : rankValue;
+
+		if (!Number.isFinite(rankValue)) {
+			return 0;
+		}
+
+		if (rankValue >= 10) return 10;
+
+		return Math.max(0, rankValue);
 	}
 
 	function handValue(hand) {
 		if (!Array.isArray(hand)) return 0;
+
 		return hand.reduce(
 			(total, card) => total + cardValue(card),
 			0,
