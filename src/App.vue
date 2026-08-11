@@ -25,6 +25,72 @@
 				<p class="setup-copy"
 					>Choose the number of players</p
 				>
+				<div class="player-name-section">
+					<label for="playerName"> Player Name </label>
+
+					<input
+						id="playerName"
+						v-model.trim="playerName"
+						type="text"
+						maxlength="20"
+						placeholder="Enter your player name"
+						autocomplete="off" />
+
+					<small v-if="!playerName">
+						Player name is required.
+					</small>
+				</div>
+
+				<div
+					v-if="setupPlayers === 2 && isOnline"
+					class="online-room-panel">
+					<div class="online-title">
+						ONLINE 2-PLAYER GAME
+					</div>
+
+					<button
+						class="action-btn blue-btn"
+						:disabled="!playerName"
+						@click="createOnlineRoom">
+						CREATE ROOM
+					</button>
+
+					<div class="room-divider"> OR </div>
+
+					<input
+						v-model.trim="joinRoomCode"
+						class="room-code-input"
+						maxlength="6"
+						placeholder="ROOM CODE"
+						@input="
+							joinRoomCode = joinRoomCode
+								.toUpperCase()
+								.replace(/[^A-Z0-9]/g, '')
+						" />
+
+					<button
+						class="action-btn blue-btn"
+						:disabled="
+							!playerName || joinRoomCode.length !== 6
+						"
+						@click="joinOnlineRoom">
+						JOIN ROOM
+					</button>
+
+					<div
+						v-if="roomCode"
+						class="room-created">
+						<span>ROOM CODE</span>
+
+						<strong>
+							{{ roomCode }}
+						</strong>
+
+						<small>
+							Waiting for another player...
+						</small>
+					</div>
+				</div>
 				<div class="player-options">
 					<button
 						v-for="option in playerOptions"
@@ -32,11 +98,33 @@
 						class="player-option"
 						:class="{
 							active: setupPlayers === option.value,
+							disabled: option.value === 2 && !isOnline,
 						}"
+						:disabled="option.value === 2 && !isOnline"
 						@click="setupPlayers = option.value">
-						<strong>{{ option.value }}</strong>
-						<span>{{ option.label }}</span>
+						<strong>
+							{{ option.value }}
+						</strong>
+
+						<span>
+							{{ option.label }}
+						</span>
+
+						<small
+							v-if="option.value === 2 && !isOnline">
+							Online only
+						</small>
 					</button>
+				</div>
+				<div
+					class="connection-status"
+					:class="{
+						online: isOnline,
+						offline: !isOnline,
+					}">
+					<span class="status-dot"></span>
+
+					{{ isOnline ? "Online" : "Offline" }}
 				</div>
 				<label class="bot-toggle">
 					<input
@@ -55,7 +143,9 @@
 					game.</div
 				>
 				<button
+					v-if="setupPlayers === 1"
 					class="action-btn blue-btn start-button"
+					:disabled="!playerName"
 					@click="startGame">
 					START GAME
 				</button>
@@ -265,7 +355,11 @@
 									class="pile-card game-card discard-card"
 									:class="[cardColor(topDiscard)]"
 									:disabled="!canDrawDiscard"
-									@click="drawFromDiscard()">
+									@click="
+										onlineMode
+											? onlineDrawDiscard()
+											: drawFromDiscard()
+									">
 									<span class="card-corner top">
 										<b>{{ topDiscard.rank }}</b>
 										<i>{{ topDiscard.suit }}</i>
@@ -350,14 +444,18 @@
 				<!-- ACTION BUTTONS -->
 				<div
 					class="action-buttons-row"
-					v-if="currentPlayer && !currentPlayer.isBot">
+					v-if="
+						currentPlayer && (!onlineMode || isMyTurn)
+					">
 					<button
 						class="action-btn blue-btn"
 						:disabled="!canCreateMeld && !canAddToMeld"
 						@click="
-							canCreateMeld
-								? createSelectedMeld()
-								: addSelectedToMeld()
+							onlineMode
+								? onlineMeld()
+								: canCreateMeld
+									? createSelectedMeld()
+									: addSelectedToMeld()
 						">
 						MELD
 					</button>
@@ -366,7 +464,11 @@
 						v-if="turnPhase === 'draw'"
 						class="action-btn blue-btn"
 						:disabled="!canDrawDeck"
-						@click="drawFromDeck">
+						@click="
+							onlineMode
+								? onlineDrawDeck()
+								: drawFromDeck()
+						">
 						DRAW
 					</button>
 
@@ -384,14 +486,22 @@
 							selectedCards.length !== 1 ||
 							turnPhase !== 'discard'
 						"
-						@click="discardSelected">
+						@click="
+							onlineMode
+								? onlineDiscard()
+								: discardSelected()
+						">
 						DISCARD
 					</button>
 
 					<button
 						v-if="canUndoDiscardTake"
 						class="action-btn red-btn"
-						@click="undoDiscardTake">
+						@click="
+							onlineMode
+								? socket.emit('game:undo-discard')
+								: undoDiscardTake()
+						">
 						UNDO
 					</button>
 				</div>
@@ -399,12 +509,12 @@
 				<!-- BOTTOM PLAYER AREA -->
 				<section
 					class="player-bottom-area"
-					v-if="currentPlayer && !currentPlayer.isBot">
+					v-if="myPlayer && !myPlayer.isBot">
 					<div class="player-profile-dock">
 						<div class="profile-avatar">👤</div>
 						<div class="profile-info-box">
 							<div class="profile-name">{{
-								currentPlayer.name
+								myPlayer.name
 							}}</div>
 							<div class="profile-chips">11.3T 💰</div>
 						</div>
@@ -450,7 +560,7 @@
 						<div class="hand-points-badge">
 							<span>POINT</span>
 							<strong>{{
-								handValue(currentPlayer.hand)
+								handValue(myPlayer.hand)
 							}}</strong>
 						</div>
 					</div>
@@ -511,12 +621,33 @@
 </template>
 
 <script setup>
+	import { io } from "socket.io-client";
 	import {
 		computed,
 		nextTick,
 		ref,
 		watch,
 	} from "vue";
+
+	const SOCKET_URL =
+		import.meta.env.VITE_SOCKET_URL ||
+		"http://localhost:3001";
+
+	const socket = io(SOCKET_URL, {
+		autoConnect: true,
+	});
+
+	const isOnline = ref(false);
+	const onlineMode = ref(false);
+
+	const playerName = ref("");
+
+	const roomCode = ref("");
+	const joinRoomCode = ref("");
+
+	const myPlayerId = ref(null);
+
+	const onlineState = ref(null);
 
 	/*
 	|--------------------------------------------------------------------------
@@ -587,11 +718,6 @@
 	|--------------------------------------------------------------------------
 	*/
 
-	const currentPlayer = computed(
-		() =>
-			players.value[currentPlayerIndex.value] ||
-			null,
-	);
 	const currentPlayerId = computed(
 		() => currentPlayer.value?.id ?? null,
 	);
@@ -614,12 +740,14 @@
 	});
 
 	const opponents = computed(() => {
+		const myId = onlineMode.value
+			? myPlayerId.value
+			: currentPlayerId.value;
+
 		return players.value.filter(
-			(player) =>
-				player.id !== currentPlayerId.value,
+			(player) => player.id !== myId,
 		);
 	});
-
 	const hasAnyMelds = computed(() => {
 		return players.value.some(
 			(player) =>
@@ -643,9 +771,29 @@
 	};
 
 	const sortedCurrentHand = computed(() => {
-		if (!currentPlayer.value) return [];
-		return [...currentPlayer.value.hand].sort(
+		const player = onlineMode.value
+			? myPlayer.value
+			: currentPlayer.value;
+
+		if (!player) {
+			return [];
+		}
+
+		return [...player.hand].sort(
 			cardSortComparator,
+		);
+	});
+
+	const isMyTurn = computed(() => {
+		if (!onlineMode.value) {
+			return true;
+		}
+
+		return (
+			!!myPlayer.value &&
+			!!onlineState.value &&
+			onlineState.value.currentPlayerId ===
+				myPlayer.value.id
 		);
 	});
 
@@ -669,6 +817,7 @@
 	const canDrawDeck = computed(() => {
 		return (
 			gameState.value === "playing" &&
+			(!onlineMode.value || isMyTurn.value) &&
 			turnPhase.value === "draw" &&
 			!!currentPlayer.value &&
 			!currentPlayer.value.isBot &&
@@ -679,6 +828,7 @@
 	const canDrawDiscard = computed(() => {
 		return (
 			gameState.value === "playing" &&
+			(!onlineMode.value || isMyTurn.value) &&
 			turnPhase.value === "draw" &&
 			!!currentPlayer.value &&
 			!currentPlayer.value.isBot &&
@@ -751,34 +901,127 @@
 	|--------------------------------------------------------------------------
 	*/
 
+	function createOnlineRoom() {
+		if (!playerName.value) {
+			showMessage(
+				"Player name is required.",
+				"warning",
+			);
+
+			return;
+		}
+
+		if (!isOnline.value) {
+			showMessage(
+				"You must be online for 2-player mode.",
+				"warning",
+			);
+
+			return;
+		}
+
+		onlineMode.value = true;
+
+		socket.emit("room:create", {
+			playerName: playerName.value,
+		});
+	}
+
 	function startGame() {
+		if (!playerName.value) {
+			showMessage(
+				"Player name is required.",
+				"warning",
+			);
+
+			return;
+		}
+
+		/*
+    |--------------------------------------------------------------------------
+    | 2 PLAYER = ONLINE ONLY
+    |--------------------------------------------------------------------------
+    */
+
+		if (setupPlayers.value === 2) {
+			if (!isOnline.value) {
+				showMessage(
+					"2-player mode requires an online connection.",
+					"warning",
+				);
+
+				return;
+			}
+
+			createOnlineRoom();
+
+			return;
+		}
+
+		/*
+    |--------------------------------------------------------------------------
+    | 1 PLAYER = LOCAL
+    |--------------------------------------------------------------------------
+    */
+
+		onlineMode.value = false;
+
 		initializePlayers();
+
+		/*
+    |--------------------------------------------------------------------------
+    | Use player's entered name
+    |--------------------------------------------------------------------------
+    */
+
+		players.value[0].name = playerName.value;
+
 		createAndShuffleDeck();
-		dealCards();
+
+		/*
+    |--------------------------------------------------------------------------
+    | RANDOMIZE STARTER BEFORE DEALING
+    |--------------------------------------------------------------------------
+    */
+
 		const randomStarter = Math.floor(
 			Math.random() * players.value.length,
 		);
+
 		currentPlayerIndex.value = randomStarter;
+
+		dealCards();
+
 		gameState.value = "playing";
+
 		turnPhase.value = "discard";
+
 		roundNumber.value = 1;
+
 		selectedCards.value = [];
+
 		winner.value = null;
+
 		winReason.value = "";
+
 		animationType.value = "";
+
 		recentlyDrawnCardIds.value = [];
 
 		showMessage(
 			`🎲 ${currentPlayer.value.name} starts and must discard first.`,
 			"success",
 		);
+
 		showSpecialEffect(
-			"🎲 " + currentPlayer.value.name,
+			`🎲 ${currentPlayer.value.name}`,
 		);
 
-		nextTick(() => {
-			processBotTurn();
-		});
+		if (!onlineMode.value) {
+			nextTick(() => {
+				processBotTurn();
+			});
+		}
 	}
 
 	function newGame() {
@@ -798,14 +1041,16 @@
 
 	function initializePlayers() {
 		const result = [];
+
 		if (setupPlayers.value === 1) {
 			result.push({
 				id: 1,
-				name: "Newbie123",
+				name: playerName.value || "Newbie123",
 				hand: [],
 				melds: [],
 				isBot: false,
 			});
+
 			if (botEnabled.value) {
 				result.push({
 					id: 2,
@@ -815,19 +1060,27 @@
 					isBot: true,
 				});
 			}
-		} else {
-			for (let i = 0; i < setupPlayers.value; i++) {
-				result.push({
-					id: i + 1,
-					name: `Player ${i + 1}`,
-					hand: [],
-					melds: [],
-					isBot: false,
-				});
-			}
 		}
+
 		players.value = result;
 	}
+
+	const currentPlayer = computed(
+		() =>
+			players.value[currentPlayerIndex.value] ||
+			null,
+	);
+	const myPlayer = computed(() => {
+		if (!onlineMode.value) {
+			return currentPlayer.value;
+		}
+
+		return (
+			players.value.find(
+				(player) => player.id === myPlayerId.value,
+			) || null
+		);
+	});
 
 	/*
 	|--------------------------------------------------------------------------
@@ -872,10 +1125,12 @@
 
 	function dealCards() {
 		const starterIndex = currentPlayerIndex.value;
+
 		players.value.forEach((player) => {
 			player.hand = [];
 			player.melds = [];
 		});
+
 		for (let round = 0; round < 12; round++) {
 			for (
 				let i = 0;
@@ -885,9 +1140,169 @@
 				drawCardToPlayer(players.value[i]);
 			}
 		}
+
 		drawCardToPlayer(players.value[starterIndex]);
+
 		discardPile.value = [];
 	}
+
+	function connectSocket() {
+		if (socket.connected) {
+			isOnline.value = true;
+			return;
+		}
+
+		socket.connect();
+	}
+
+	socket.on("connect", () => {
+		isOnline.value = true;
+
+		console.log("Socket connected:", socket.id);
+	});
+
+	socket.on("disconnect", () => {
+		isOnline.value = false;
+
+		if (onlineMode.value) {
+			showMessage(
+				"Connection to the game server was lost.",
+				"warning",
+			);
+		}
+	});
+
+	socket.on("connect_error", () => {
+		isOnline.value = false;
+	});
+
+	function joinOnlineRoom() {
+		if (!playerName.value) {
+			showMessage(
+				"Player name is required.",
+				"warning",
+			);
+
+			return;
+		}
+
+		if (!joinRoomCode.value) {
+			showMessage("Enter a room code.", "warning");
+
+			return;
+		}
+
+		if (!isOnline.value) {
+			showMessage(
+				"You must be online for 2-player mode.",
+				"warning",
+			);
+
+			return;
+		}
+
+		onlineMode.value = true;
+
+		socket.emit("room:join", {
+			roomCode: joinRoomCode.value,
+			playerName: playerName.value,
+		});
+	}
+
+	socket.on(
+		"room:created",
+		({ roomCode: code, playerId }) => {
+			roomCode.value = code;
+			myPlayerId.value = Number(playerId);
+			showMessage(
+				`Room ${code} created. Waiting for another player...`,
+				"success",
+			);
+		},
+	);
+
+	socket.on(
+		"room:joined",
+		({ roomCode: code, playerId }) => {
+			roomCode.value = code;
+			myPlayerId.value = Number(playerId);
+			showMessage(`Joined room ${code}.`, "success");
+		},
+	);
+
+	socket.on("game:state", (state) => {
+		if (!onlineMode.value || !state) return;
+
+		onlineState.value = state;
+		players.value = Array.isArray(state.players)
+			? state.players.map((player) => ({
+					...player,
+					hand: Array.isArray(player.hand)
+						? player.hand
+						: [],
+					melds: Array.isArray(player.melds)
+						? player.melds
+						: [],
+					points: Number.isFinite(
+						Number(player.points),
+					)
+						? Number(player.points)
+						: 0,
+				}))
+			: [];
+
+		discardPile.value = Array.isArray(
+			state.discardPile,
+		)
+			? state.discardPile
+			: [];
+		currentPlayerIndex.value = Number.isInteger(
+			state.currentPlayerIndex,
+		)
+			? state.currentPlayerIndex
+			: 0;
+		turnPhase.value = state.turnPhase || "draw";
+		winner.value = state.winner || null;
+		winReason.value = state.winReason || "";
+
+		gameState.value =
+			state.status === "finished"
+				? "finished"
+				: state.status === "playing"
+					? "playing"
+					: "setup";
+
+		// The backend intentionally sends only the deck count.
+		deck.value = Array.from(
+			{
+				length: Math.max(
+					0,
+					Number(state.deckCount) || 0,
+				),
+			},
+			(_, index) => ({ id: `server-card-${index}` }),
+		);
+
+		selectedCards.value = [];
+		selectedMeldTarget.value = null;
+	});
+
+	socket.on(
+		"game:message",
+		({ text, type = "info" }) => {
+			showMessage(text, type);
+		},
+	);
+
+	socket.on(
+		"game:error",
+		({ message: errorMessage }) => {
+			showMessage(
+				errorMessage || "Game action failed.",
+				"warning",
+			);
+		},
+	);
 
 	function drawCardToPlayer(player) {
 		const card = deck.value.pop();
@@ -1169,6 +1584,57 @@
 		}
 		return false;
 	}
+	function onlineDrawDiscard() {
+		if (!onlineMode.value || !isMyTurn.value)
+			return;
+		socket.emit("game:draw-discard");
+	}
+
+	function onlineMeld() {
+		if (!onlineMode.value || !isMyTurn.value)
+			return;
+
+		if (canCreateMeld.value) {
+			socket.emit("game:create-meld", {
+				cardIds: [...selectedCards.value],
+			});
+			return;
+		}
+
+		if (
+			canAddToMeld.value &&
+			selectedMeldTarget.value
+		) {
+			socket.emit("game:add-to-meld", {
+				cardId: selectedCards.value[0],
+				targetPlayerId:
+					selectedMeldTarget.value.playerId,
+				meldIndex: selectedMeldTarget.value.meldIndex,
+			});
+		}
+	}
+
+	function onlineDrawDeck() {
+		if (!onlineMode.value) {
+			return;
+		}
+
+		socket.emit("game:draw-deck");
+	}
+
+	function onlineDiscard() {
+		if (
+			!onlineMode.value ||
+			selectedCards.value.length !== 1
+		) {
+			return;
+		}
+
+		const cardId = selectedCards.value[0];
+		if (cardId == null) return;
+
+		socket.emit("game:discard", { cardId });
+	}
 
 	function discardSelected() {
 		if (
@@ -1243,11 +1709,13 @@
 
 	function cardValue(card) {
 		if (!card) return 0;
-		if (card.rankValue >= 10) return 10;
-		return card.rankValue;
+		const rankValue = Number(card.rankValue);
+		if (!Number.isFinite(rankValue)) return 0;
+		return rankValue >= 10 ? 10 : rankValue;
 	}
 
 	function handValue(hand) {
+		if (!Array.isArray(hand)) return 0;
 		return hand.reduce(
 			(total, card) => total + cardValue(card),
 			0,
@@ -1256,6 +1724,10 @@
 
 	/* BOT LOGIC (Simplified for brevity, unchanged core logic) */
 	async function processBotTurn() {
+		if (onlineMode.value) {
+			return;
+		}
+
 		if (
 			gameState.value !== "playing" ||
 			!currentPlayer.value?.isBot
@@ -2523,5 +2995,139 @@
 			height: 40px;
 			font-size: 20px;
 		}
+	}
+
+	.player-name-section {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		margin-bottom: 14px;
+	}
+
+	.player-name-section label {
+		color: #fff;
+		font-size: 12px;
+		font-weight: bold;
+		text-transform: uppercase;
+	}
+
+	.player-name-section input,
+	.room-code-input {
+		width: 100%;
+		padding: 12px 14px;
+		border: 2px solid #2389a9;
+		border-radius: 8px;
+		background: #071735;
+		color: white;
+		font-size: 14px;
+		outline: none;
+	}
+
+	.player-name-section input:focus,
+	.room-code-input:focus {
+		border-color: #3edc8f;
+	}
+
+	.player-name-section small {
+		color: #ffcc00;
+		font-size: 10px;
+	}
+
+	.player-option.disabled {
+		opacity: 0.4;
+		filter: grayscale(0.8);
+		cursor: not-allowed;
+	}
+
+	.player-option small {
+		display: block;
+		margin-top: 4px;
+		color: #ffcc00;
+		font-size: 9px;
+	}
+
+	.connection-status {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 7px;
+		font-size: 11px;
+		margin: -4px 0 10px;
+	}
+
+	.status-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		display: inline-block;
+	}
+
+	.connection-status.online {
+		color: #3edc8f;
+	}
+
+	.connection-status.online .status-dot {
+		background: #3edc8f;
+		box-shadow: 0 0 8px #3edc8f;
+	}
+
+	.connection-status.offline {
+		color: #ff6b6b;
+	}
+
+	.connection-status.offline .status-dot {
+		background: #ff6b6b;
+	}
+
+	.online-room-panel {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		padding: 14px;
+		margin-top: 5px;
+		background: rgba(0, 0, 0, 0.25);
+		border: 1px solid #2389a9;
+		border-radius: 10px;
+	}
+
+	.online-title {
+		text-align: center;
+		color: #3edc8f;
+		font-size: 12px;
+		font-weight: 900;
+		letter-spacing: 1px;
+	}
+
+	.room-divider {
+		text-align: center;
+		color: #777;
+		font-size: 10px;
+	}
+
+	.room-created {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 4px;
+		padding: 12px;
+		background: #071735;
+		border-radius: 8px;
+	}
+
+	.room-created span {
+		color: #aaa;
+		font-size: 9px;
+		font-weight: bold;
+	}
+
+	.room-created strong {
+		color: #ffcc00;
+		font-size: 28px;
+		letter-spacing: 5px;
+	}
+
+	.room-created small {
+		color: #aaa;
+		font-size: 10px;
 	}
 </style>
